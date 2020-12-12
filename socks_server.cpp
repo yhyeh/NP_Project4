@@ -4,224 +4,157 @@
 #include <sstream>
 #include <vector>
 #include <sys/wait.h>
+#include <netinet/in.h>
+#include <stdio.h>
 
 
 using boost::asio::ip::tcp;
+boost::asio::io_context io_context;
 
-class session
-  : public std::enable_shared_from_this<session>
-{
-public:
-  session(tcp::socket socket)
-    : socket_(std::move(socket))
+class socks_server {
+ public:
+  socks_server(uint16_t port)
+      : _acceptor(io_context, {tcp::v4(), port})
   {
+    do_accept();
   }
 
-  void start()
-  {
-    do_read();
-  }
+ private:
+  void do_accept() {
+    _acceptor.async_accept(
+        [this](boost::system::error_code ec, tcp::socket new_socket) {
+          if (!ec) {
+            _browser_socket = std::move(new_socket);
+            io_context.notify_fork(boost::asio::io_context::fork_prepare);
 
-private:
-  void do_read()
-  {
-    auto self(shared_from_this());
-    socket_.async_read_some(boost::asio::buffer(rdata_, max_length),
-        [this, self](boost::system::error_code ec, std::size_t length)
-        {
-          if (!ec)
-          {
-            /* view request */
-            std::string req(rdata_);
-            std::cout << req << std::endl;
-            /* parse request */
-            parseReq(req);
-            
-            /* fork */
             int pid;
             if ((pid = fork()) == -1){
               std::cerr << "fork: " << strerror(errno) << std::endl;
               exit(0);
             }
-            if (pid == 0){ //child
-              /* set all env */
-              setenv("REQUEST_METHOD", REQUEST_METHOD.c_str(), 1);
-              setenv("REQUEST_URI", REQUEST_URI.c_str(), 1);
-              setenv("QUERY_STRING", QUERY_STRING.c_str(), 1);
-              setenv("SERVER_PROTOCOL", SERVER_PROTOCOL.c_str(), 1);
-              setenv("HTTP_HOST", HTTP_HOST.c_str(), 1);
-              setenv("SERVER_ADDR", SERVER_ADDR.c_str(), 1);
-              setenv("SERVER_PORT", SERVER_PORT.c_str(), 1);
-              setenv("REMOTE_ADDR", REMOTE_ADDR.c_str(), 1);
-              setenv("REMOTE_PORT", REMOTE_PORT.c_str(), 1);
-              setenv("DOCUMENT_ROOT", ".", 1);
-              
-              /* dup, close fd, exec */
-              dup2(socket_.native_handle(), STDOUT_FILENO);
-              for (int fd = 3; fd <= __FD_SETSIZE; fd++){
-                close(fd);
-              }
-              std::cout << "HTTP/1.1 200 OK\r\n";
-              std::vector<std::string> emptyARGV;
-              std::string fpath = std::string(getenv("DOCUMENT_ROOT")).append(getenv("REQUEST_URI"));
-              if(execvp(fpath.c_str(), vecStrToChar(emptyARGV)) == -1){
-                std::cerr << "execvp: " << strerror(errno) << std::endl;
-                std::cout << "HTTP/1.1 404 Not Found\r\n\r\n";
-                exit(0);
-              }
+            if (pid == 0) { //child
+              io_context.notify_fork(boost::asio::io_context::fork_child);
+              _acceptor.close();
+              do_read_req();
+
+            } else { //paraent
+              io_context.notify_fork(boost::asio::io_context::fork_parent);
+              _browser_socket.close();
+              do_accept();
             }
-            else{ //parent
-              socket_.close();
-            }
+          } else {
+            std::cerr << "Accept error: " << ec.message() << std::endl;
+            do_accept();
+
           }
         });
   }
 
-  void do_write(std::size_t length)
-  {
-    auto self(shared_from_this());
-    boost::asio::async_write(socket_, boost::asio::buffer(wdata_, length),
-        [this, self](boost::system::error_code ec, std::size_t /*length*/)
+  void do_read_req() {
+    boost::asio::async_read_until(_browser_socket,
+        boost::asio::dynamic_buffer(input_buffer_), '\0',
+        [this](boost::system::error_code ec, std::size_t length)
         {
           if (!ec)
           {
-            // do_read();
+            std::cout << "length: " << length << std::endl;
+            for (size_t i = 0; i < input_buffer_.size(); i++){
+              printf("%d\n", input_buffer_[i]);
+            }
+            std::cout << "socks4 size: " << sizeof(req) << std::endl;
+            req.VN = input_buffer_[0];
+            req.CD = input_buffer_[1];
+            req.DSTPORT = input_buffer_[2] << 8 |
+                          input_buffer_[3];
+            req.DSTIP[0] = input_buffer_[4];
+            req.DSTIP[1] = input_buffer_[5];
+            req.DSTIP[2] = input_buffer_[6];
+            req.DSTIP[3] = input_buffer_[7];
+            
+            SRCIP = _browser_socket.remote_endpoint().address().to_string();
+            SRCPORT = _browser_socket.remote_endpoint().port();
+            std::cout << "req.VN: " << (int)req.VN << std::endl;
+            std::cout << "req.CD: " << (int)req.CD << std::endl;
+            std::cout << "<S_IP>: " << SRCIP << std::endl;
+            std::cout << "<S_PORT>: " << SRCPORT << std::endl;
+            std::cout << "<D_IP>: " << IPtoStr(req.DSTIP) << std::endl;
+            std::cout << "<D_PORT>: " << req.DSTPORT << std::endl;
+            if (req.CD == CD_CONN){
+              std::cout << "<Command>: " << "CONNECT" << std::endl;
+            }else if (req.CD == CD_BIND){
+              std::cout << "<Command>: " << "BIND" << std::endl;
+            }
+            // match socks.conf
+            // if accept
+            output_buffer_.clear();
+            rep.VN = (unsigned char) 0;
+            rep.CD = (unsigned char) CD_ACCP;
+            output_buffer_.push_back(rep.VN);
+            output_buffer_.push_back(rep.CD);
+            for (int i = 0; i < 6; i++){
+              output_buffer_.push_back(0);
+            }
+            do_write_rep();
           }
         });
   }
+  void do_write_rep() {
+    
+  }
 
-  
-
-  tcp::socket socket_;
-  enum { max_length = 4096 };
+  tcp::acceptor _acceptor{io_context};
+  tcp::resolver _resolver{io_context};
+  tcp::socket _browser_socket{io_context};
+  tcp::socket _service_socket{io_context};
+  /*
+  enum { max_length = 512 };
   char rdata_[max_length];
   char wdata_[max_length];
-  // bool isPanel = false;
-  // bool isConsole = false;
-  std::string REQUEST_METHOD;
-  std::string REQUEST_URI;
-  std::string QUERY_STRING;
-  std::string SERVER_PROTOCOL;
-  std::string HTTP_HOST;
-  std::string SERVER_ADDR;
-  std::string SERVER_PORT;
-  std::string REMOTE_ADDR;
-  std::string REMOTE_PORT;
-
-  /* util function */
-  void parseReq(std::string req){
-    /* store all env as string */
-    std::istringstream issReq(req);
-    std::string lineInReq;
-    for (int iLine = 0; iLine < 2; iLine++){
-      std::getline(issReq, lineInReq);
-      if (iLine == 0){
-        /* GET /panel.cgi HTTP/1.1 */
-        /* GET /console.cgi?h0=nplinux1.cs.nctu.edu.tw&p0= ... */
-        std::istringstream issLine(lineInReq);
-        std::string wordInLine;
-        for(int iWord = 0; iWord < 3; iWord++){
-          std::getline(issLine, wordInLine, ' ');
-          if(iWord == 0){
-            /* GET */
-            REQUEST_METHOD = wordInLine;
-          }
-          else if (iWord == 1){
-            /* /panel.cgi */
-            /* /console.cgi?h0=nplinux1.cs.nctu.edu.tw&p0= ... */
-            std::string file = wordInLine.substr(1, wordInLine.find_first_of(".")-1);
-            file = "/" + file + ".cgi";
-            REQUEST_URI = file;
-            if (wordInLine.find_first_of("?") == std::string::npos){
-              QUERY_STRING = "";
-            }else {
-              QUERY_STRING = wordInLine.substr(wordInLine.find_first_of("?")+1);
-            }
-          }
-          else{
-            /* HTTP/1.1 */
-            SERVER_PROTOCOL = wordInLine;
-          }
-        }
-      }
-      else if (iLine == 1){
-        /* Host: localhost:18787 */
-        HTTP_HOST = lineInReq.substr(6);
-      }             
-    }
-    /* set other env */
-    SERVER_ADDR = socket_.local_endpoint().address().to_string();
-    SERVER_PORT = std::to_string(socket_.local_endpoint().port());
-    REMOTE_ADDR = socket_.remote_endpoint().address().to_string();
-    REMOTE_PORT = std::to_string(socket_.remote_endpoint().port());
+  */
+  std::vector<unsigned char> input_buffer_;
+  std::vector<unsigned char> output_buffer_;
+  struct socks4{
+    unsigned char VN;
+    unsigned char CD;
+    unsigned short DSTPORT; // 2 byte
+    unsigned char DSTIP[4]; // 4 byte
+    unsigned char nullByte = '\0';
+  };
+  enum {
+    CD_CONN = 1,
+    CD_BIND = 2,
+    CD_ACCP = 90,
+    CD_RJCT = 91
+  };
+  struct socks4 req, rep;
+  unsigned short SRCPORT;
+  std::string SRCIP;
+  // util
+  std::string IPtoStr(unsigned char* iparr){
+    char buffer [16];
+    sprintf(buffer, "%d.%d.%d.%d", iparr[0], iparr[1], iparr[2], iparr[3]);
+    return std::string(buffer);
   }
-  char** vecStrToChar(std::vector<std::string> cmd)
-  {
-    char** result = (char**)malloc(sizeof(char*)*(cmd.size()+1));
-    for(size_t i = 0; i < cmd.size(); i++){
-      result[i] = strdup(cmd[i].c_str());
-    }
-    result[cmd.size()] = NULL;
-    return result;
-  }
-};
-
-class server
-{
-public:
-  server(boost::asio::io_context& io_context, short port)
-    : acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
-  {
-    do_accept();
-  }
-
-private:
-  void do_accept()
-  {
-    acceptor_.async_accept(
-        [this](boost::system::error_code ec, tcp::socket socket)
-        {
-          if (!ec)
-          {
-            std::make_shared<session>(std::move(socket))->start();
-          }
-
-          do_accept();
-        });
-  }
-
-  tcp::acceptor acceptor_;
 };
 
 void childHandler(int sig){
   while(waitpid(-1, NULL, WNOHANG) > 0){
-
   }
 }
 
-
-int main(int argc, char* argv[])
-{
-  try
-  {
-    if (argc != 2)
-    {
-      std::cerr << "Usage: http_server <port>\n";
+int main(int argc, char *argv[]) {
+  using namespace std;
+  signal (SIGCHLD, childHandler);
+  
+  try {
+    if (argc!=2) {
+      std::cerr << "Usage: ./socks_server <port>\n";
       return 1;
     }
-
-    signal (SIGCHLD, childHandler);
-
-    boost::asio::io_context io_context;
-
-    server s(io_context, std::atoi(argv[1]));
-
+    socks_server s(atoi(argv[1]));
     io_context.run();
   }
-  catch (std::exception& e)
-  {
-    std::cerr << "Exception: " << e.what() << "\n";
+  catch (exception &e) {
+    cerr << "Exception: " << e.what() << endl;
   }
-
-  return 0;
 }
