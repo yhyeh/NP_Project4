@@ -6,6 +6,10 @@
 # Node artifact files
 node_modules/
 dist/
+test_case/
+*.cgi
+socks_server
+*.json
 
 # Compiled Java class files
 *.class

@@ -5,7 +5,7 @@ CXX_INCLUDE_PARAMS=$(addprefix -I , $(CXX_INCLUDE_DIRS))
 CXX_LIB_DIRS=/usr/local/lib
 CXX_LIB_PARAMS=$(addprefix -L , $(CXX_LIB_DIRS))
 
-all: socks_server.cpp console.cpp
+all: socks_server.cpp hw4.cgi
 	$(CXX) socks_server.cpp -o socks_server $(CXX_INCLUDE_PARAMS) $(CXX_LIB_PARAMS) $(CXXFLAGS)
 
 hw4.cgi: console.cpp

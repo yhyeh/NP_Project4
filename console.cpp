@@ -13,6 +13,13 @@ struct shConn{
   std::string shPort;
   std::string cmdFile;
 };
+struct socks4{
+  unsigned char VN;
+  unsigned char CD;
+  unsigned short DSTPORT; // 2 byte
+  unsigned char DSTIP[4]; // 4 byte
+  unsigned char nullByte = '\0';
+};
 
 /* function */
 std::vector<struct shConn> parseQry();
@@ -34,11 +41,23 @@ private:
   enum { max_length = 4096 };
   char rdata_[max_length];
   std::string input_buffer_;
+  std::vector<unsigned char> output_buffer_;
 
   struct shConn shInfo;
+  struct shConn socksInfo;
+  bool useSOCKS;
+  bool isWaitingRep;
   std::vector<std::string> cmdVec;
   std::string cmd;
   bool stopped_ = false;
+
+  enum {
+    CD_CONN = 1,
+    CD_BIND = 2,
+    CD_ACCP = 90,
+    CD_RJCT = 91
+  };
+  struct socks4 req, rep;
 public:
   ShellSession(boost::asio::io_context& io_context)
     : socket_(io_context),
@@ -46,17 +65,25 @@ private:
   {
     memset(rdata_, '\0', max_length);
   }
-  void start(struct shConn shConn, int sessionID) 
+  void start(std::vector<struct shConn> shConnVec , int sessionID, bool useSocks) 
   {
-    shInfo = shConn;
+    shInfo = shConnVec[sessionID];
     session = sessionID;
+    isWaitingRep = false;
+    useSOCKS = useSocks;
+    if (useSOCKS) socksInfo = shConnVec[5];
     memset(rdata_, '\0', max_length);
     /*
     std::cout << "constructor session: " << session << std::endl;
     std::cout << "shInfo.shHost: " << shInfo.shHost << std::endl;
     std::cout << "shInfo.shPort: " << shInfo.shPort << std::endl;
     */
-    std::fstream fs("./test_case/" + shInfo.cmdFile);
+    std::ifstream fs;
+    try{
+      fs.open("./test_case/" + shInfo.cmdFile);
+    }catch(std::exception& e){
+      std::cout << e.what() << std::endl;
+    }
     std::string lineInCmd;
     while(std::getline(fs, lineInCmd)){
       lineInCmd.append("\n");
@@ -79,8 +106,18 @@ private:
 private:  
   void do_resolve() {
     if (stopped_) return;
+
+    std::string tgHost, tgPort;
+    if (useSOCKS){
+      tgHost = socksInfo.shHost;
+      tgPort = socksInfo.shPort;
+    }else{
+      tgHost = shInfo.shHost;
+      tgPort = shInfo.shPort;
+    }
+
     auto self(shared_from_this());
-    resolver_.async_resolve(shInfo.shHost, shInfo.shPort,
+    resolver_.async_resolve(tgHost, tgPort,
       [this, self](boost::system::error_code ec,
       tcp::resolver::results_type returned_endpoints)
       {
@@ -88,12 +125,14 @@ private:
         if (!ec)
         {
           endpoints = returned_endpoints;
+          /*
           tcp::resolver::results_type::iterator endpoint_iter = endpoints.begin();
           while(endpoint_iter != endpoints.end())
           {
-            //std::cout << "Trying " << endpoint_iter->endpoint() << "\n";
+            std::cout << "Trying " << endpoint_iter->endpoint() << "\n";
             endpoint_iter++;
           }
+          */
           do_connect();
         }
         else{
@@ -111,7 +150,13 @@ private:
       if (!ec)
       {
         //do_send_cmd(); // for test in echo server
-        do_read();
+        if (useSOCKS) {
+          //std::cout << "socks server connect success " << "\n";
+          send_socks_req();
+        }else {
+          do_read();
+        }
+        
       }
       else{
         std::cout << "connect Error: " << ec.message() << "\n";
@@ -119,6 +164,71 @@ private:
       }
     });
   }
+  void send_socks_req(){
+    output_buffer_.clear();
+    output_buffer_.push_back(4); // reqest
+    output_buffer_.push_back(1); // CONNECT
+
+    tcp::resolver::results_type endpoints;
+    // DST PORT & IP are set
+    unsigned short shPort_short = (unsigned short) atoi(shInfo.shPort.c_str());
+    unsigned char h_port = (unsigned char) (shPort_short >> 8);
+    unsigned char l_port = (unsigned char) (shPort_short & 0x00FF);
+    output_buffer_.push_back(h_port);
+    output_buffer_.push_back(l_port);
+    // send request pkt
+    try {
+      endpoints = resolver_.resolve(shInfo.shHost, shInfo.shPort);
+    }catch (std::exception& e){
+      // do socks4a ip: 0.0.0.1
+      for (int i = 0; i < 3; i++){
+        output_buffer_.push_back(0);
+      }
+      output_buffer_.push_back(1);
+      output_buffer_.push_back(0); // null
+      for (size_t i = 0; i < shInfo.shHost.size(); i++){
+        output_buffer_.push_back(shInfo.shHost[i]);
+      }
+      output_buffer_.push_back(0); // null
+    }
+    //do socks4
+    tcp::resolver::results_type::iterator endpoint_iter = endpoints.begin();
+    /*
+    while(endpoint_iter != endpoints.end())
+    {
+      std::cout << "Trying " << endpoint_iter->endpoint() << "\n";
+      endpoint_iter++;
+    }
+    */
+    tcp::endpoint endpoint = endpoints.begin()->endpoint();
+    boost::asio::ip::address_v4::bytes_type shIpByte = endpoint.address().to_v4().to_bytes();
+    for (int i = 0; i < 4; i++){
+      output_buffer_.push_back(shIpByte[i]);
+    }
+    /*
+    std::cout << "output_buffer ******************" << std::endl;
+    for (size_t i = 0; i < output_buffer_.size(); i++){
+      printf("%d\n", output_buffer_[i]);
+    }
+    */
+
+    // send socks request to socks server
+    auto self(shared_from_this());
+    boost::asio::async_write(socket_, boost::asio::buffer(output_buffer_, output_buffer_.size()),
+        [this, self](boost::system::error_code ec, std::size_t )
+        {
+          if (!ec)
+          {
+            isWaitingRep = true;
+            do_read();
+          }else{
+            std::cout << "write socks req Error: " << ec.message() << std::endl;
+            stop();
+          }
+
+        });
+    
+  }
   void do_read() 
   {
     if (stopped_) return;
@@ -127,23 +237,39 @@ private:
         boost::asio::buffer(rdata_, max_length-1), 
         [this, self](boost::system::error_code ec, std::size_t length)
         {
-          if (stopped_) return;
+          //if (stopped_) return;
           if (!ec){
             rdata_[length+1] = '\0';
-            //std::cout << "(raw recv "<< length <<")" << rdata_ << std::endl;
-            
-            std::string reply = std::string(rdata_);
-            memset(rdata_, '\0', max_length);
-            output_shell(session, reply);
-            //std::cout << "(recv)" << reply << std::flush;
-            
-            if (reply.find("% ") != std::string::npos){
-              //std::cout << "get %" << std::endl;
-              do_send_cmd();
-            }else{
-              // do_send_cmd(); // for test in echo server
-               do_read();
+            // std::cout << "(raw socks4 rep "<< length <<")" << rdata_ << std::endl;
+            if (isWaitingRep){ // catch socks reply
+              // VN=0
+              if (rdata_[0] != 0) std::cerr << "warning: this is not socks reply" << std::endl;
+              else {
+                // CD=90 or 91
+                if (rdata_[1] == CD_ACCP){
+                  isWaitingRep = false;
+                  do_read();
+                }else if (rdata_[1] == CD_RJCT){
+                  stop();
+                }
+              }
             }
+            else{
+              std::string reply = std::string(rdata_);
+              memset(rdata_, '\0', max_length);
+              
+              output_shell(session, reply);
+              //std::cout << "(recv)" << reply << std::flush;
+              
+              if (reply.find("% ") != std::string::npos){
+                //std::cout << "get %" << std::endl;
+                do_send_cmd();
+              }else{
+                // do_send_cmd(); // for test in echo server
+                do_read();
+              }
+            }
+            
             
           }
           else{
@@ -192,10 +318,11 @@ private:
 
 int main(){
   /* test */
-  //setenv("QUERY_STRING", "h0=nplinux1.cs.nctu.edu.tw&p0=19999&f0=t5.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=", 1);
+  //setenv("QUERY_STRING", "h0=nplinux12.cs.nctu.edu.tw&p0=19999&f0=t1.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=&sh=nplinux11.cs.nctu.edu.tw&sp=17878", 1);
   
 
   std::vector<struct shConn> shConnVec = parseQry();
+  bool useSOCKS = (shConnVec[5].shHost != "");
   std::string tmpl;
   getTemplate(tmpl, shConnVec);
   /* render html */
@@ -209,7 +336,7 @@ int main(){
     for (s = 0; s < 5; s++){
       if (shConnVec[s].shHost == "") continue;
       //std::cout << "start session: " << s << std::endl;
-      std::make_shared<ShellSession>(io_context)->start(shConnVec[s], (int)s);
+      std::make_shared<ShellSession>(io_context)->start(shConnVec, (int)s, useSOCKS);
     }
     io_context.run();
   }
@@ -228,7 +355,7 @@ std::vector<struct shConn> parseQry(){
   std::istringstream issQry(getenv("QUERY_STRING"));
   std::string itmInQry;
   std::string itmNoHead;
-  for(int iConn = 0; iConn < 5; iConn++){
+  for(int iConn = 0; iConn < 6; iConn++){
     struct shConn tmp;
     shConnVec.push_back(tmp);
     /* nplinux1.cs.nctu.edu.tw */
@@ -244,6 +371,9 @@ std::vector<struct shConn> parseQry(){
     getline(issQry, itmInQry, '&');
     itmNoHead = itmInQry.substr(itmInQry.find_first_of("=")+1);
     shConnVec[iConn].shPort = itmNoHead;
+    
+    // socks has no input file
+    if (iConn == 5) break;
     /* t1.txt */
     getline(issQry, itmInQry, '&');
     itmNoHead = itmInQry.substr(itmInQry.find_first_of("=")+1);
