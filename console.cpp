@@ -47,6 +47,7 @@ private:
   struct shConn socksInfo;
   bool useSOCKS;
   bool isWaitingRep;
+  bool isRepWithSh;
   std::vector<std::string> cmdVec;
   std::string cmd;
   bool stopped_ = false;
@@ -70,6 +71,7 @@ private:
     shInfo = shConnVec[sessionID];
     session = sessionID;
     isWaitingRep = false;
+    isRepWithSh = false;
     useSOCKS = useSocks;
     if (useSOCKS) socksInfo = shConnVec[5];
     memset(rdata_, '\0', max_length);
@@ -240,21 +242,43 @@ private:
           //if (stopped_) return;
           if (!ec){
             rdata_[length+1] = '\0';
-            // std::cout << "(raw socks4 rep "<< length <<")" << rdata_ << std::endl;
             if (isWaitingRep){ // catch socks reply
+              //std::cout << "constructor session: " << session << std::endl;
+              //std::cout << "(raw socks4 rep "<< length <<")" << rdata_ << std::endl;
+              //std::cout << "socks reply ******************" << std::endl;
+              /*
+              for (int i = 0; i < 8; i++){
+                printf("%d\n", rdata_[i]);
+              }
+              */
               // VN=0
-              if (rdata_[0] != 0) std::cerr << "warning: this is not socks reply" << std::endl;
-              else {
+              if (rdata_[0] != 0) {
+                std::cout << "warning: this is not socks reply" << std::endl;
+                do_read();
+
+              }else {
                 // CD=90 or 91
                 if (rdata_[1] == CD_ACCP){
                   isWaitingRep = false;
-                  do_read();
+                  if (length > 8){
+                    isRepWithSh = true;
+                    for (std::size_t i = 8; i < length; i++){
+                      rdata_[i-8] = rdata_[i];
+                    }
+                  }else{
+                    do_read();
+                  }
+
                 }else if (rdata_[1] == CD_RJCT){
                   stop();
                 }
+                else{
+                  do_read();
+                }
               }
             }
-            else{
+            
+            if (!isWaitingRep || isRepWithSh){
               std::string reply = std::string(rdata_);
               memset(rdata_, '\0', max_length);
               
