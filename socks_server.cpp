@@ -7,6 +7,8 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <algorithm>
+#include <fstream>
+#include <regex>
 
 
 using boost::asio::ip::tcp;
@@ -58,11 +60,12 @@ class socks_server {
         {
           if (!ec)
           {
-            std::cout << "read some length: " << length << std::endl;
-            
+            //std::cout << "read some length: " << length << std::endl;
+            /*
             for (size_t i = 0; i < length; i++){
               printf("%d\n", input_buffer_[i]);
             }
+            */
             
             //std::cout << "socks4 size: " << sizeof(req) << std::endl;
             req.VN = input_buffer_[0];
@@ -93,7 +96,7 @@ class socks_server {
                 }
               }
               if (unresolveDst.size()!=0){
-                std::cout << "<D_DOMAIN>: " << unresolveDst << std::endl;
+                //std::cout << "<D_DOMAIN>: " << unresolveDst << std::endl;
               }
               
             }
@@ -105,6 +108,7 @@ class socks_server {
 
             //std::cout << "req.VN: " << (int)req.VN << std::endl;
             //std::cout << "req.CD: " << (int)req.CD << std::endl;
+            std::cout << std::endl;
             std::cout << "<S_IP>: " << SRCIP << std::endl;
             std::cout << "<S_PORT>: " << SRCPORT << std::endl;
             //std::cout << "<SOCKS_IP>: " << SOCKSIP << std::endl;
@@ -117,31 +121,26 @@ class socks_server {
                 do_resolve(IPtoStr(req.DSTIP));
               }
             }else if (req.CD == CD_BIND){
-              std::cout << "<D_IP>: " << IPtoStr(req.DSTIP) << std::endl;
+              dstip = IPtoStr(req.DSTIP);
+              std::cout << "<D_IP>: " << dstip << std::endl;
               std::cout << "<D_PORT>: " << req.DSTPORT << std::endl;
               std::cout << "<Command>: BIND" << std::endl;
           
+              firewall();
+              if (rep.CD == CD_ACCP){
+                std::cout << "<Reply>: Accept" << std::endl;
+              }else if (rep.CD == CD_RJCT){
+                std::cout << "<Reply>: Reject" << std::endl;
+              }
+              
               output_buffer_.clear();
               rep.VN = (unsigned char) 0;
               rep.CD = (unsigned char) CD_ACCP;
               output_buffer_.push_back(rep.VN);
               output_buffer_.push_back(rep.CD);
 
-              // build server for ftp data transmission
-              boost::asio::ip::address_v4::bytes_type socksipByte = SOCKSIP.to_v4().to_bytes();
-              // DST PORT & IP are set
-              unsigned char h_port = (unsigned char) (SRCPORT >> 8);
-              unsigned char l_port = (unsigned char) (SRCPORT & 0x00FF);
-              output_buffer_.push_back(h_port);
-              output_buffer_.push_back(l_port);
-              for (int i = 0; i < 4; i++){
-                output_buffer_.push_back(socksipByte[i]);
-              }
-              std::cout << "output_buffer ******************" << std::endl;
-              for (int i = 0; i < 8; i++){
-                printf("%d\n", output_buffer_[i]);
-              }
-              std::cout << "start binding ftpListener ******************" << std::endl;
+              
+              //std::cout << "start binding ftpListener ******************" << std::endl;
               do_ftp_accept();
               do_write_rep();
               
@@ -153,13 +152,33 @@ class socks_server {
   }
 
   void do_ftp_accept(){
-      tcp::endpoint endpoint(tcp::v4(), SRCPORT);
+      tcp::endpoint endpoint(tcp::v4(), 0);
 
       _ftp_acceptor.open(endpoint.protocol());
       _ftp_acceptor.bind(endpoint);
       _ftp_acceptor.listen();
+      BINDPORT = _ftp_acceptor.local_endpoint().port();
+
+      // build server for ftp data transmission
+      boost::asio::ip::address_v4::bytes_type socksipByte = SOCKSIP.to_v4().to_bytes();
+      // DST PORT & IP are set
+      unsigned char h_port = (unsigned char) (BINDPORT >> 8);
+      unsigned char l_port = (unsigned char) (BINDPORT & 0x00FF);
+      output_buffer_.push_back(h_port);
+      output_buffer_.push_back(l_port);
+      for (int i = 0; i < 4; i++){
+        output_buffer_.push_back(socksipByte[i]);
+      }
+      /*
+      std::cout << "output_buffer ******************" << std::endl;
+      for (int i = 0; i < 8; i++){
+        printf("%d\n", output_buffer_[i]);
+      }
+      */
+
       do_write_rep_only();
       _ftp_acceptor.accept(_service_socket);
+
     /*
     _ftp_acceptor.async_accept(
       [this](boost::system::error_code ec, tcp::socket new_socket) {
@@ -184,12 +203,14 @@ class socks_server {
         {
           endpoints = returned_endpoints;
           tcp::resolver::results_type::iterator endpoint_iter = endpoints.begin();
+          /*
           while(endpoint_iter != endpoints.end())
           {
             std::cout << "Trying " << endpoint_iter->endpoint() << "\n";
             endpoint_iter++;
             
           }
+          */
           do_connect();
         }
         else{
@@ -203,22 +224,27 @@ class socks_server {
     [this](boost::system::error_code ec, tcp::endpoint endpoint){
       if (!ec)
       {
-        std::cout << "Done service connection" << std::endl;
+        //std::cout << "Done service connection" << std::endl;
         
         // print remaining info
-        std::cout << "<D_IP>: " << endpoint.address().to_string() << std::endl;
+        dstip = endpoint.address().to_string();
+        std::cout << "<D_IP>: " << dstip << std::endl;
         std::cout << "<D_PORT>: " << req.DSTPORT << std::endl;
-        // TODO ************************************************
-        // match endpoints socks.conf 
+        std::cout << "<Command>: CONNECT" << std::endl;
         
-        // send reply
+        firewall();
+        if (rep.CD == CD_ACCP){
+          std::cout << "<Reply>: Accept" << std::endl;
+        }else if (rep.CD == CD_RJCT){
+          std::cout << "<Reply>: Reject" << std::endl;
+        }
+
+        // form reply
         output_buffer_.clear();
         rep.VN = (unsigned char) 0;
-        rep.CD = (unsigned char) CD_ACCP;
         output_buffer_.push_back(rep.VN);
         output_buffer_.push_back(rep.CD);
 
-        std::cout << "<Command>: CONNECT" << std::endl;
         // DST PORT & IP are useless fields
         for (int i = 0; i < 6; i++){
           output_buffer_.push_back(0);
@@ -232,19 +258,75 @@ class socks_server {
     });
   }
   
+  void firewall(){
+    // match endpoints socks.conf 
+    std::ifstream fs;
+    rep.CD = (unsigned char) CD_RJCT;
+
+    try{
+      fs.open("socks.conf");
+    }catch(std::exception& e){
+      std::cerr << e.what() << std::endl;
+    }
+    std::string rawRule;
+    std::string permit, action, ippat, ipreg;
+    while(std::getline(fs, rawRule)){
+      std::istringstream iss(rawRule);
+      std::getline(iss, permit, ' ');
+      std::getline(iss, action, ' ');
+      if ((req.CD == CD_CONN && action == "c") ||
+          (req.CD == CD_BIND && action == "b")){
+        //std::cout << "rule: " << rawRule << std::endl;
+        
+        std::getline(iss, ippat, ' ');
+        //ipreg="/";
+        ipreg.clear();
+        for(size_t i = 0; i < ippat.size(); i++){
+          if(ippat[i] == '.'){
+            ipreg.append("\\.");
+          }else if(ippat[i] == '*'){
+            ipreg.append("(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]\\d|\\d)");
+          }else{
+            ipreg.append(ippat.substr(i,1));
+          }
+        }
+        //ipreg.append("/g");
+        //std::cout << "regex: " << ipreg << std::endl;
+
+        if (std::regex_match(dstip, std::regex(ipreg))){
+          //std::cout << "dstip accept\n";
+          rep.CD = (unsigned char) CD_ACCP;
+          break;
+        }
+      }
+    }
+    fs.close();
+  }
+
   void do_write_rep() {
     boost::asio::async_write(_browser_socket, boost::asio::buffer(output_buffer_, output_buffer_.size()),
         [this](boost::system::error_code ec, std::size_t )
         {
           if (!ec)
           {
+            
+
             if (req.CD == CD_CONN){
-              std::cout << "Done socks4 CONNECT reply" << std::endl;
+              //std::cout << "Done socks4 CONNECT reply" << std::endl;
             }else if(req.CD == CD_BIND){
-              std::cout << "Done socks4 BIND reply 2" << std::endl;
+              //std::cout << "Done socks4 BIND reply 2" << std::endl;
             }
-            do_read_serv_req();
-            do_read_serv_rep();
+            
+            if (rep.CD == CD_RJCT){
+              _browser_socket.close();
+              _service_socket.close();
+              //std::cout << "Reject, socket closed..." << std::endl;
+
+            }else{
+              do_read_serv_req();
+              do_read_serv_rep();
+            }
+            
           }
         });
   }
@@ -254,7 +336,7 @@ class socks_server {
         {
           if (!ec)
           {
-            std::cout << "Done socks4 BIND reply 1" << std::endl;
+            //std::cout << "Done socks4 BIND reply 1" << std::endl;
           }
         });
   }
@@ -266,7 +348,7 @@ class socks_server {
           if (!ec)
           {
             brdata_[length+1] = '\0';
-            std::cout << "(raw brdata_ "<< length <<")" << brdata_ << std::endl;
+            //std::cout << "(raw brdata_ "<< length <<")" << brdata_ << std::endl;
             do_write_serv_req(length);
           }
         });
@@ -277,7 +359,7 @@ class socks_server {
         {
           if (!ec)
           {
-            std::cout << "Done passing http request" << std::endl;
+            //std::cout << "Done passing http request" << std::endl;
             memset(brdata_, '\0', max_length);
             do_read_serv_req();
           }
@@ -291,7 +373,7 @@ class socks_server {
           if (!ec)
           {
             srdata_[length+1] = '\0';
-            std::cout << "(raw srdata_ "<< length <<")" << srdata_ << std::endl;
+            //std::cout << "(raw srdata_ "<< length <<")" << srdata_ << std::endl;
             do_write_serv_rep(length);
           }
         });
@@ -302,7 +384,7 @@ class socks_server {
         {
           if (!ec)
           {
-            std::cout << "Done passing http reply" << std::endl;
+            //std::cout << "Done passing http reply" << std::endl;
             memset(srdata_, '\0', max_length);
             do_read_serv_rep();
           }
@@ -342,8 +424,9 @@ class socks_server {
   struct socks4 req, rep;
   unsigned short SRCPORT;
   std::string SRCIP;
-  //unsigned short SOCKSPORT;
+  unsigned short BINDPORT;
   boost::asio::ip::address SOCKSIP;
+  std::string dstip;
 
   // util
   std::string IPtoStr(unsigned char* iparr){
