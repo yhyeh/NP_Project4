@@ -1,4 +1,4 @@
-Network Programming Project 4 - SOCKS 4
+Network Programming Project 4 - SOCKS 4 Server
 ===
 
 ### Functions
@@ -13,3 +13,8 @@ Network Programming Project 4 - SOCKS 4
 > SOCKS client
 
 - modify console cgi in project3 to connect with SOCKS server before accessing RWG server
+
+### Other projects in this course
+- [Project 1 - NPShell](https://github.com/yhyeh/NP_Project1)
+- [Project 2 - Remote Working Ground (RWG) Server](https://github.com/yhyeh/NP_Project2)
+- [Project 3 - Remote Batch System](https://github.com/yhyeh/NP_Project3)
